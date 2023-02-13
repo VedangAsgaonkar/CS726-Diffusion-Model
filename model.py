@@ -1,4 +1,5 @@
 import torch
+import torch.nn as nn
 import pytorch_lightning as pl
 
 class LitDiffusionModel(pl.LightningModule):
@@ -19,14 +20,33 @@ class LitDiffusionModel(pl.LightningModule):
         If your `model` is different for different datasets, you can use a hyperparameter to switch between them.
         Make sure that your hyperparameter behaves as expecte and is being saved correctly in `hparams.yaml`.
         """
-        self.time_embed = None
-        self.model = None
+
+        self.num_hidden_layers = 3
+        self.n_steps = n_steps
+        self.n_dim = n_dim
+
+        def getTimeEmbedding(t, dim_time=10):
+            x = torch.arange(1, 1 + dim_time//2)
+            x = 2*x/dim_time
+            sin_emb = torch.sin(t[:,None]/10000*(x[None,:]))
+            cos_emb = torch.cos(t[:,None]/10000*(x[None,:]))
+            out = torch.zeros(t.shape[0],dim_time)
+            even = 2*torch.arange(dim_time//2)
+            out[:,even] = sin_emb
+            out[:,even+1] = cos_emb
+            return out
+
+        self.time_embed = getTimeEmbedding
+        self.model = torch.nn.Sequential(
+            nn.Linear(self.n_dim+10, self.n_dim),
+            nn.ReLU(),
+            *[nn.Linear(self.n_dim, self.n_dim) if i%2==0 else nn.ReLU() for i in range(2*self.num_hidden_layers)],
+            nn.Linear(self.n_dim, self.n_dim)
+        )
 
         """
         Be sure to save at least these 2 parameters in the model instance.
         """
-        self.n_steps = n_steps
-        self.n_dim = n_dim
 
         """
         Sets up variables for noise schedule
@@ -50,7 +70,17 @@ class LitDiffusionModel(pl.LightningModule):
         switch between various schedules for answering q4 in depth. Make sure that this hyperparameter 
         is included correctly while saving and loading your checkpoints.
         """
-        pass
+        def getBeta(t):
+            return lbeta+(ubeta-lbeta)*t/self.n_steps
+
+        def getAlpha(t):
+            product = 1
+            for i in range(t):
+                product = product*(1-getBeta(i))
+            return product
+        
+        self.getBeta = getBeta
+        self.getAlpha = getAlpha
 
     def q_sample(self, x, t):
         """
@@ -80,7 +110,14 @@ class LitDiffusionModel(pl.LightningModule):
         [2]: https://pytorch-lightning.readthedocs.io/en/stable/
         [3]: https://www.pytorchlightning.ai/tutorials
         """
-        pass
+        t = torch.randint(0, self.n_steps, (batch.shape[0],)) # random time step
+        alpha = torch.tensor([self.getAlpha(time) for time in t])[:,None] # check
+        # x0 = batch[int(torch.randint(0, batch.shape[0], (1,))), :] # random batch sample
+        # epsilon = torch.normal(mean=torch.FloatTensor([0.0]*batch.shape[0]), std=torch.FloatTensor([1.0]*batch.shape[1])) # sampled from N(0, I)
+        epsilon = torch.randn(batch.shape)
+        loss = epsilon - self.forward((alpha**0.5 * batch) + ((1-alpha)**0.5 * epsilon), t)
+        # print(torch.norm(loss)**2)
+        return torch.sum(loss**2)
 
     def sample(self, n_samples, progress=False, return_intermediate=False):
         """
@@ -96,7 +133,19 @@ class LitDiffusionModel(pl.LightningModule):
             i.e. a Tensor of size (n_samples, n_dim) and a list of `self.n_steps` Tensors of size (n_samples, n_dim) each.
             Return: (n_samples, n_dim)(final result), [(n_samples, n_dim)(intermediate) x n_steps]
         """
-        pass
+        X = torch.zeros((n_samples, self.n_dim, self.n_steps+1))
+        X[:,:,self.n_steps] = torch.randn((n_samples, self.n_dim))
+        for t in range(self.n_steps,0,-1):
+            z = torch.randn((n_samples, self.n_dim))
+            alpha = self.getAlpha(t)
+            beta = self.getBeta(t)
+            x = X[:,:,t]
+            X[:,:,t-1] = (x - ((beta)/(1-alpha)**0.5)*self.forward(x,t))/(1-beta)**0.5 +z* beta**0.5
+        if return_intermediate:
+            return X[:,:,0], X[:,:,1:]
+        else:
+            return X[:,:,0]
+
 
     def configure_optimizers(self):
         """
@@ -105,4 +154,4 @@ class LitDiffusionModel(pl.LightningModule):
         You may choose to add certain hyperparameters of the optimizers to the `train.py` as well.
         In our experiments, we chose one good value of optimizer hyperparameters for all experiments.
         """
-        pass
+        return torch.optim.SGD(self.parameters(), lr=0.001, momentum=0.8)
