@@ -21,11 +21,11 @@ class LitDiffusionModel(pl.LightningModule):
         Make sure that your hyperparameter behaves as expecte and is being saved correctly in `hparams.yaml`.
         """
 
-        self.num_hidden_layers = 3
+        self.num_hidden_layers = 5
         self.n_steps = n_steps
         self.n_dim = n_dim
 
-        def getTimeEmbedding(t, dim_time=10):
+        def getTimeEmbedding(t, dim_time=6):
             x = torch.arange(1, 1 + dim_time//2)
             x = 2*x/dim_time
             sin_emb = torch.sin(t[:,None]/10000*(x[None,:]))
@@ -37,12 +37,23 @@ class LitDiffusionModel(pl.LightningModule):
             return out
 
         self.time_embed = getTimeEmbedding
+        # self.model = torch.nn.Sequential(
+        #     nn.Linear(self.n_dim+6, 8),
+        #     nn.ReLU(),
+        #     *[nn.Linear(8, 8) if i%2==0 else nn.ReLU() for i in range(2*self.num_hidden_layers)],
+        #     nn.Linear(8, self.n_dim)
+        # )
         self.model = torch.nn.Sequential(
-            nn.Linear(self.n_dim+10, self.n_dim),
+            nn.Conv1d(1, 8, kernel_size=2),
             nn.ReLU(),
-            *[nn.Linear(self.n_dim, self.n_dim) if i%2==0 else nn.ReLU() for i in range(2*self.num_hidden_layers)],
-            nn.Linear(self.n_dim, self.n_dim)
+            nn.Conv1d(8, 8, kernel_size=2),
+            nn.Flatten(),
+            nn.Linear(56,32),
+            nn.ReLU(),
+            nn.Linear(32,3)
         )
+        print(self.model)
+        self.model.train()
 
         """
         Be sure to save at least these 2 parameters in the model instance.
@@ -62,7 +73,9 @@ class LitDiffusionModel(pl.LightningModule):
         if not isinstance(t, torch.Tensor):
             t = torch.LongTensor([t]).expand(x.size(0))
         t_embed = self.time_embed(t)
-        return self.model(torch.cat((x, t_embed), dim=1).float())
+        inp = torch.cat((x, t_embed), dim=1).float()
+        inp = inp[:,None,:]
+        return self.model(inp)
 
     def init_alpha_beta_schedule(self, lbeta, ubeta):
         """
@@ -86,13 +99,14 @@ class LitDiffusionModel(pl.LightningModule):
         """
         Sample from q given x_t.
         """
-        pass
+        alpha = self.getAlpha(t)
+        return torch.randn(x.shape)*(1-alpha)**0.5 + alpha**0.5
 
     def p_sample(self, x, t):
         """
         Sample from p given x_t.
         """
-        pass
+        
 
     def training_step(self, batch, batch_idx):
         """
@@ -111,13 +125,14 @@ class LitDiffusionModel(pl.LightningModule):
         [3]: https://www.pytorchlightning.ai/tutorials
         """
         t = torch.randint(0, self.n_steps, (batch.shape[0],)) # random time step
-        alpha = torch.tensor([self.getAlpha(time) for time in t])[:,None] # check
+        alpha = torch.tensor([self.getAlpha(time) for time in t], requires_grad=True)[:,None] # check
         # x0 = batch[int(torch.randint(0, batch.shape[0], (1,))), :] # random batch sample
         # epsilon = torch.normal(mean=torch.FloatTensor([0.0]*batch.shape[0]), std=torch.FloatTensor([1.0]*batch.shape[1])) # sampled from N(0, I)
-        epsilon = torch.randn(batch.shape)
+        epsilon = torch.randn(batch.shape, requires_grad=True)
         loss = epsilon - self.forward((alpha**0.5 * batch) + ((1-alpha)**0.5 * epsilon), t)
         # print(torch.norm(loss)**2)
-        return torch.sum(loss**2)
+        # print(torch.mean(torch.sum(loss**2, dim=1)))
+        return torch.mean(torch.sum(loss**2, dim=1))
 
     def sample(self, n_samples, progress=False, return_intermediate=False):
         """
@@ -154,4 +169,4 @@ class LitDiffusionModel(pl.LightningModule):
         You may choose to add certain hyperparameters of the optimizers to the `train.py` as well.
         In our experiments, we chose one good value of optimizer hyperparameters for all experiments.
         """
-        return torch.optim.SGD(self.parameters(), lr=0.001, momentum=0.8)
+        return torch.optim.Adam(self.parameters(), lr=0.01)
